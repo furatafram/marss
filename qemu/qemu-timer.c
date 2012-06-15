@@ -156,10 +156,19 @@ void cpu_disable_ticks(void)
 
 void cpu_set_sim_ticks(void)
 {
-    timers_state.cpu_sim_ticks_offset = timers_state.cpu_ticks_offset +
-        cpu_get_real_ticks();
-    timers_state.cpu_sim_clock_offset = timers_state.cpu_clock_offset +
-        get_clock();
+    if (sim_update_clock_offset == 1) {
+        if (timers_state.cpu_ticks_enabled) {
+            timers_state.cpu_sim_ticks_offset = timers_state.cpu_ticks_offset +
+                cpu_get_real_ticks();
+            timers_state.cpu_sim_clock_offset = timers_state.cpu_clock_offset +
+                get_clock();
+        } else {
+            timers_state.cpu_sim_ticks_offset = timers_state.cpu_ticks_offset;
+            timers_state.cpu_sim_clock_offset = timers_state.cpu_clock_offset;
+        }
+        /* Disable offset update until simulation mode set this flag */
+        sim_update_clock_offset = 0;
+    }
 }
 
 static int64_t cpu_get_sim_clock(void)
@@ -244,6 +253,10 @@ static void qemu_rearm_alarm_timer(struct qemu_alarm_timer *t)
 
 /* TODO: MIN_TIMER_REARM_NS should be optimized */
 #define MIN_TIMER_REARM_NS 250000
+
+#ifdef MARSS_QEMU
+#define SIM_MIN_TIMER_REARM_NS (MIN_TIMER_REARM_NS * 4)
+#endif
 
 #ifdef _WIN32
 
@@ -940,6 +953,11 @@ static void dynticks_rearm_timer(struct qemu_alarm_timer *t)
     nearest_delta_ns = qemu_next_alarm_deadline();
     if (nearest_delta_ns < MIN_TIMER_REARM_NS)
         nearest_delta_ns = MIN_TIMER_REARM_NS;
+
+#ifdef MARSS_QEMU
+	if (in_simulation && nearest_delta_ns < SIM_MIN_TIMER_REARM_NS)
+		nearest_delta_ns = SIM_MIN_TIMER_REARM_NS;
+#endif
 
     /* check whether a timer is already running */
     if (timer_gettime(host_timer, &timeout)) {

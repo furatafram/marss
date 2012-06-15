@@ -226,7 +226,7 @@ static const int MAX_BB_X86_INSNS = 60;
 static const int MAX_BB_UOPS = 63;
 static const int MAX_BB_PER_PAGE = 4096;
 
-static const int MAX_TRANSOPS_PER_USER_INSN = 16;
+static const int MAX_TRANSOPS_PER_USER_INSN = 24;
 
 extern const char* exception_names[EXCEPTION_COUNT];
 
@@ -904,7 +904,7 @@ struct Context: public CPUX86State {
 	  return eip;
   }
 
-  int copy_from_user(void* target, Waddr source, int bytes, PageFaultErrorCode& pfec, Waddr& faultaddr, bool forexec = true) ;
+  int copy_from_vm(void* target, Waddr source, int bytes, PageFaultErrorCode& pfec, Waddr& faultaddr, bool forexec = true) ;
 
   CPUTLBEntry* get_tlb_entry(Waddr virtaddr) {
 	  int mmu_idx = cpu_mmu_index((CPUX86State*)this);
@@ -926,7 +926,7 @@ struct Context: public CPUX86State {
     return 0;
   }
 
-  int copy_from_user(void* target, Waddr source, int bytes) ;
+  int copy_from_vm(void* target, Waddr source, int bytes) ;
 
   W64 loadvirt(Waddr virtaddr, int sizeshift=3);
   W64 loadphys(Waddr addr, bool internal=0, int sizeshift=3);
@@ -1426,8 +1426,8 @@ union MaskControlInfo {
 };
 
 #define MakePermuteControlInfo(b7, b6, b5, b4, b3, b2, b1, b0) \
-  (b7 << (7*4)) + (b6 << (6*4)) + (b5 << (5*4)) + (b4 << (4*4)) + \
-  (b3 << (3*4)) + (b2 << (2*4)) + (b1 << (1*4)) + (b0 << (0*4))
+  (W32)(b7 << (7*4)) + (W32)(b6 << (6*4)) + (W32)(b5 << (5*4)) + (W32)(b4 << (4*4)) + \
+  (W32)(b3 << (3*4)) + (W32)(b2 << (2*4)) + (W32)(b1 << (1*4)) + (W32)(b0 << (0*4))
 
 union PermbControlInfo {
   struct { W32 b0:4, b1:4, b2:4, b3:4, b4:4, b5:4, b6:4, b7:4; } info;

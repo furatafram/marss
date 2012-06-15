@@ -9,6 +9,7 @@
 #include <ptlsim.h>
 #include <decode.h>
 
+#include <setjmp.h>
 
 BasicBlockCache bbcache[NUM_SIM_CORES];
 W8 BasicBlockCache::cpuid_counter = 0;
@@ -33,6 +34,10 @@ BasicBlockPageCache bbpages;
 CycleTimer translate_timer("translate");
 
 ofstream bbcache_dump_file;
+
+static jmp_buf decode_jmp_buf;
+
+#define DECODE_EXCEPTION() longjmp(decode_jmp_buf, 1)
 
 //
 // Calling convention:
@@ -321,6 +326,7 @@ const light_assist_func_t light_assistid_to_func[L_ASSIST_COUNT] = {
     l_assist_ioport_out,
     l_assist_pause,
     l_assist_popcnt,
+	l_assist_x87_fist,
 };
 
 const char* light_assist_names[L_ASSIST_COUNT] = {
@@ -331,7 +337,8 @@ const char* light_assist_names[L_ASSIST_COUNT] = {
 	"l_io_in",
 	"l_io_out",
 	"l_pause",
-    "l_popcnt"
+    "l_popcnt",
+	"l_x87_fist",
 };
 
 int light_assist_index(light_assist_func_t assist) {
@@ -1217,6 +1224,8 @@ void TraceDecoder::address_generate_and_load_or_store(int destreg, int srcreg, c
 
     int imm_bits = (memop) ? 32 : 64;
 
+	if (memref.type != OPTYPE_MEM) DECODE_EXCEPTION();
+
     int basereg = arch_pseudo_reg_to_arch_reg[memref.mem.basereg];
     int indexreg = arch_pseudo_reg_to_arch_reg[memref.mem.indexreg];
     // ld rd = ra,rb,rc
@@ -1648,16 +1657,16 @@ void TraceDecoder::split(bool after) {
 
 void print_invalid_insns(int op, const byte* ripstart, const byte* rip, int valid_byte_count, const PageFaultErrorCode& pfec, Waddr faultaddr) {
     if (pfec) {
-        if (logable(4)) ptl_logfile << "translate: page fault at iteration ", iterations, ", ", total_user_insns_committed, " commits: ",
+        if (logable(4)) ptl_logfile << "translate: page fault at iteration ", iterations, ", ", total_insns_committed, " commits: ",
             "ripstart ", ripstart, ", rip ", rip, ": required ", (rip - ripstart), " more bytes but only fetched ", valid_byte_count, " bytes; ",
                 "page fault error code: ", pfec, endl, flush;
     } else {
-        if (logable(4)) ptl_logfile << "translate: invalid opcode at iteration ", iterations, ": ", (void*)(Waddr)op, " commits ", total_user_insns_committed, " (at ripstart ", ripstart, ", rip ", rip, "); may be speculative", endl, flush;
+        if (logable(4)) ptl_logfile << "translate: invalid opcode at iteration ", iterations, ": ", (void*)(Waddr)op, " commits ", total_insns_committed, " (at ripstart ", ripstart, ", rip ", rip, "); may be speculative", endl, flush;
 #if 0
         if (!config.dumpcode_filename.empty()) {
             byte insnbuf[256];
             PageFaultErrorCode copypfec;
-            int valid_byte_count = contextof(0).copy_from_user(insnbuf, (Waddr)rip, sizeof(insnbuf), copypfec, faultaddr);
+            int valid_byte_count = contextof(0).copy_from_vm(insnbuf, (Waddr)rip, sizeof(insnbuf), copypfec, faultaddr);
             odstream os(config.dumpcode_filename);
             os.write(insnbuf, sizeof(insnbuf));
             os.close();
@@ -1683,8 +1692,7 @@ bool BasicBlockCache::invalidate(BasicBlock* bb, int reason) {
     }
 
     if unlikely (bbcache_dump_file) {
-        bbcache_dump_file.write(reinterpret_cast<char*>((BasicBlockBase*)bb), sizeof(BasicBlockBase));
-        bbcache_dump_file.write(reinterpret_cast<char*>(bb->transops), bb->count * sizeof(TransOp));
+        bbcache_dump_file << *bb << endl;
     }
 
     pagelist = bbpages.get(bb->rip.mfnlo);
@@ -1795,7 +1803,7 @@ int BasicBlockCache::reclaim(size_t bytesreq, int urgency) {
 
     if (!count) return 0;
 
-    if (DEBUG) ptl_logfile << "Reclaiming cached basic blocks at ", sim_cycle, " cycles, ", total_user_insns_committed, " commits:", endl;
+    if (DEBUG) ptl_logfile << "Reclaiming cached basic blocks at ", sim_cycle, " cycles, ", total_insns_committed, " commits:", endl;
 
     if (DECODERSTAT)
         DECODERSTAT->reclaim_rounds++;
@@ -1912,7 +1920,7 @@ int BasicBlockCache::reclaim(size_t bytesreq, int urgency) {
 void BasicBlockCache::flush(int8_t context_id) {
 
     if (logable(1))
-        ptl_logfile << "Flushing basic block cache at ", sim_cycle, " cycles, ", total_user_insns_committed, " commits:", endl;
+        ptl_logfile << "Flushing basic block cache at ", sim_cycle, " cycles, ", total_insns_committed, " commits:", endl;
 
     if (DECODERSTAT)
         DECODERSTAT->reclaim_rounds++;
@@ -2126,7 +2134,7 @@ int TraceDecoder::fillbuf(Context& ctx, byte* insnbytes, int insnbytes_bufsize) 
     faultaddr = 0;
     pfec = 0;
     invalid = 0;
-    valid_byte_count = ctx.copy_from_user(insnbytes, bb.rip, insnbytes_bufsize, pfec, faultaddr, true);
+    valid_byte_count = ctx.copy_from_vm(insnbytes, bb.rip, insnbytes_bufsize, pfec, faultaddr, true);
     return valid_byte_count;
 }
 
@@ -2178,6 +2186,9 @@ bool TraceDecoder::translate() {
                     use_mmx = true;
                 op |= 0x300; // no prefix byte, typically OPps
             }
+
+			if (op == 0x4d6)
+				use_mmx = true;
         } else {
             op |= 0x100;
         }
@@ -2216,38 +2227,52 @@ bool TraceDecoder::translate() {
         return false;
     }
 
-    switch (op >> 8) {
-        case 0:
-        case 1: {
-                    rc = decode_fast();
+	if (setjmp(decode_jmp_buf) == 0) {
+		switch (op >> 8) {
+			case 0:
+			case 1: {
+						rc = decode_fast();
 
-                    // Try again with the complex decoder if needed
-                    bool iscomplex = ((rc == 0) & (!invalid));
-                    some_insns_complex |= iscomplex;
-                    if (iscomplex) rc = decode_complex();
+						// Try again with the complex decoder if needed
+						bool iscomplex = ((rc == 0) & (!invalid));
+						some_insns_complex |= iscomplex;
+						if (iscomplex) rc = decode_complex();
 
-                    if unlikely (used_microcode_assist) {
-                        DECODERSTAT->x86_decode_type[DECODE_TYPE_ASSIST]++;
-                    } else {
-                        DECODERSTAT->x86_decode_type[DECODE_TYPE_FAST] += (!iscomplex);
-                        DECODERSTAT->x86_decode_type[DECODE_TYPE_COMPLEX] += iscomplex;
-                    }
+						if unlikely (used_microcode_assist) {
+							DECODERSTAT->x86_decode_type[DECODE_TYPE_ASSIST]++;
+						} else {
+							DECODERSTAT->x86_decode_type[DECODE_TYPE_FAST] += (!iscomplex);
+							DECODERSTAT->x86_decode_type[DECODE_TYPE_COMPLEX] += iscomplex;
+						}
 
-                    break;
-                }
-        case 2:
-        case 3:
-        case 4:
-        case 5:
-                DECODERSTAT->x86_decode_type[DECODE_TYPE_SSE]++;
-                rc = decode_sse(); break;
-        case 6:
-                DECODERSTAT->x86_decode_type[DECODE_TYPE_X87]++;
-                rc = decode_x87(); break;
-        default: {
-                     assert(false);
-                 }
-    } // switch
+						break;
+					}
+			case 2:
+			case 3:
+			case 4:
+			case 5:
+					DECODERSTAT->x86_decode_type[DECODE_TYPE_SSE]++;
+					rc = decode_sse(); break;
+			case 6:
+					DECODERSTAT->x86_decode_type[DECODE_TYPE_X87]++;
+					rc = decode_x87(); break;
+			default: {
+						 assert(false);
+					 }
+		} // switch
+	} else {
+		/* Decoder Exception occured!! Something must have gone wrong while
+		 * decoding an instruciton. Mark this instruction as invalid and
+		 * return, if this decoding is on wrong path then simulator will not
+		 * come back on this same instruction address. */
+		ptl_logfile << "[EXCEPTION] Decoder Exception while decoding " <<
+			"instruction at address: " << hexstring(rip, 48) << endl;
+		invalidate();
+		user_insn_count++;
+		end_of_block = 1;
+		flush();
+		return false;
+	}
 
     if (!rc) return rc;
 
@@ -2348,7 +2373,7 @@ BasicBlock* BasicBlockCache::translate(Context& ctx, const RIPVirtPhys& rvp) {
     }
 
     if (logable(10) | log_code_page_ops) {
-        ptl_logfile << "Translating ", rvp, " (", trans->valid_byte_count, " bytes valid) at ", sim_cycle, " cycles, ", total_user_insns_committed, " commits", endl;
+        ptl_logfile << "Translating ", rvp, " (", trans->valid_byte_count, " bytes valid) at ", sim_cycle, " cycles, ", total_insns_committed, " commits", endl;
         ptl_logfile << "Instruction Buffer: 64[", trans->use64, "] \n";
         foreach(i, (int)sizeof(insnbuf)) {
             ptl_logfile << hexstring(insnbuf[i], 8), " ";
@@ -2473,7 +2498,7 @@ void BasicBlockCache::translate_in_place(BasicBlock& targetbb, Context& ctx, Wad
     trans.fillbuf(ctx, insnbuf, sizeof(insnbuf));
 
     if (logable(5) | log_code_page_ops) {
-        ptl_logfile << "Translating ", rvp, " (", trans.valid_byte_count, " bytes valid) at ", sim_cycle, " cycles, ", total_user_insns_committed, " commits", endl;
+        ptl_logfile << "Translating ", rvp, " (", trans.valid_byte_count, " bytes valid) at ", sim_cycle, " cycles, ", total_insns_committed, " commits", endl;
     }
 
     for (;;) {
@@ -2508,7 +2533,7 @@ BasicBlock* BasicBlockCache::translate_and_clone(Context& ctx, Waddr rip) {
     trans.fillbuf(ctx, insnbuf, sizeof(insnbuf));
 
     if (logable(5) | log_code_page_ops) {
-        ptl_logfile << "Translating ", rvp, " (", trans.valid_byte_count, " bytes valid) at ", sim_cycle, " cycles, ", total_user_insns_committed, " commits", endl;
+        ptl_logfile << "Translating ", rvp, " (", trans.valid_byte_count, " bytes valid) at ", sim_cycle, " cycles, ", total_insns_committed, " commits", endl;
     }
 
     for (;;) {

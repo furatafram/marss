@@ -71,22 +71,6 @@ MemoryHierarchy::MemoryHierarchy(BaseMachine& machine) :
 
 MemoryHierarchy::~MemoryHierarchy()
 {
-    // Delete all the cpu-controllers and cache-controllers
-	foreach(i, cpuControllers_.count()) {
-        delete cpuControllers_[i];
-	}
-    cpuControllers_.clear();
-
-	foreach(i, allControllers_.count()) {
-        delete allControllers_[i];
-	}
-    allControllers_.clear();
-
-	foreach(i, allInterconnects_.count()) {
-        delete allInterconnects_[i];
-	}
-    allInterconnects_.clear();
-
     foreach(i, NUM_SIM_CORES) {
         RequestPool* pool = requestPool_.pop();
         delete pool;
@@ -438,7 +422,7 @@ bool MemoryHierarchy::grab_lock(W64 lockaddr, W8 ctx_id)
 
     MemoryInterlockEntry* lock = interlocks.select_and_lock(lockaddr);
 
-    if(lock && lock->ctx_id == (W8)-1) {
+    if likely (lock && lock->ctx_id == (W8)-1) {
         lock->ctx_id = ctx_id;
         ret = true;
     }
@@ -487,7 +471,7 @@ bool MemoryHierarchy::probe_lock(W64 lockaddr, W8 ctx_id)
 
     MemoryInterlockEntry* lock = interlocks.probe(lockaddr);
 
-    if(!lock) { // If no one has grab the lock
+    if likely (!lock) { // If no one has grab the lock
         ret = true;
     } else if(lock && lock->ctx_id == ctx_id) {
         ret = true;

@@ -1387,19 +1387,18 @@ static void main_loop(void)
 
     for (;;) {
 #ifdef MARSS_QEMU
-            if (!vm_running && simulation_configured) {
-                simulation_configured = 0;
-                vm_start();
-            }
+            ptl_check_ptlcall_queue();
 
             if (start_simulation) {
                 cpu_set_sim_ticks();
                 in_simulation = 1;
                 start_simulation = 0;
                 tb_flush(first_cpu);
+
+                if (!vm_running)
+                    vm_start();
             }
 
-            ptl_check_ptlcall_queue();
 #endif
 
 #ifndef CONFIG_IOTHREAD
@@ -3367,6 +3366,10 @@ int main(int argc, char **argv, char **envp)
         }
     }
 
+#ifdef MARSS_QEMU
+    ptl_qemu_initialized();
+#endif
+
     if (incoming) {
         int ret = qemu_start_incoming_migration(incoming);
         if (ret < 0) {
@@ -3379,12 +3382,6 @@ int main(int argc, char **argv, char **envp)
     }
 
     os_setup_post();
-
-#ifdef MARSS_QEMU
-    if (simpoint_enabled) {
-        set_next_simpoint(first_cpu);
-    }
-#endif
 
     main_loop();
     quit_timers();
